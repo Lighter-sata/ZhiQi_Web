@@ -1,0 +1,141 @@
+# ==========================================
+# 芝栖养生平台 - Docker Compose配置
+# ==========================================
+
+version: '3.8'
+
+services:
+  # ==========================================
+  # 后端API服务
+  # ==========================================
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    container_name: zhiqi-backend
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - DATABASE_URL=mysql+mysqlconnector://zhiqi_user:zhiqi_password@db:3306/wellness_platform_db
+      - JWT_SECRET_KEY=your-production-jwt-secret-key-here
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - uploads:/app/uploads
+      - ./logs:/app/logs
+    networks:
+      - zhiqi-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ==========================================
+  # 前端开发服务 (仅开发环境)
+  # ==========================================
+  frontend-dev:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+    container_name: zhiqi-frontend-dev
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - NODE_ENV=development
+      - VUE_APP_API_BASE_URL=http://localhost:5000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - zhiqi-network
+    profiles:
+      - dev
+
+  # ==========================================
+  # MySQL数据库
+  # ==========================================
+  db:
+    image: mysql:8.0
+    container_name: zhiqi-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: wellness_platform_db
+      MYSQL_USER: zhiqi_user
+      MYSQL_PASSWORD: zhiqi_password
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./backend/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+    networks:
+      - zhiqi-network
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+    command: --default-authentication-plugin=mysql_native_password
+
+  # ==========================================
+  # Nginx反向代理 (生产环境)
+  # ==========================================
+  nginx:
+    image: nginx:alpine
+    container_name: zhiqi-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - static_files:/app/static
+    depends_on:
+      - backend
+    networks:
+      - zhiqi-network
+    profiles:
+      - prod
+
+  # ==========================================
+  # Redis缓存 (可选)
+  # ==========================================
+  redis:
+    image: redis:7-alpine
+    container_name: zhiqi-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - zhiqi-network
+    command: redis-server --appendonly yes
+    profiles:
+      - cache
+
+# ==========================================
+# 网络配置
+# ==========================================
+networks:
+  zhiqi-network:
+    driver: bridge
+
+# ==========================================
+# 数据卷配置
+# ==========================================
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  uploads:
+    driver: local
+  static_files:
+    driver: local

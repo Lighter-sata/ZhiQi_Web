@@ -1,0 +1,281 @@
+# ==========================================
+# 芝栖养生平台 - CI/CD工作流
+# ==========================================
+
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  # ==========================================
+  # 后端测试和构建
+  # ==========================================
+  backend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 安装依赖
+      run: |
+        cd backend
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+
+    - name: 运行后端测试
+      run: |
+        cd backend
+        python test_basic.py
+
+    - name: 检查代码质量
+      run: |
+        cd backend
+        # 这里可以添加代码质量检查工具
+        # 如: flake8, black, mypy等
+
+  # ==========================================
+  # 前端测试和构建
+  # ==========================================
+  frontend-test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '16'
+        cache: 'npm'
+        cache-dependency-path: frontend/package-lock.json
+
+    - name: 安装前端依赖
+      run: |
+        cd frontend
+        npm ci
+
+    - name: 运行前端测试
+      run: |
+        cd frontend
+        npm run lint
+
+    - name: 构建前端应用
+      run: |
+        cd frontend
+        npm run build
+
+    - name: 上传构建产物
+      uses: actions/upload-artifact@v3
+      with:
+        name: frontend-dist
+        path: frontend/dist/
+        retention-days: 7
+
+  # ==========================================
+  # Docker镜像构建
+  # ==========================================
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test]
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: 登录Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: 构建并推送Docker镜像
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/zhiqi-wellness:latest
+          ${{ secrets.DOCKER_USERNAME }}/zhiqi-wellness:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # ==========================================
+  # 部署到生产环境 (仅在main分支)
+  # ==========================================
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+    - name: 部署到生产服务器
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.PRODUCTION_HOST }}
+        username: ${{ secrets.PRODUCTION_USER }}
+        key: ${{ secrets.PRODUCTION_SSH_KEY }}
+        script: |
+          # 停止当前容器
+          docker-compose down
+
+          # 拉取最新镜像
+          docker pull ${{ secrets.DOCKER_USERNAME }}/zhiqi-wellness:latest
+
+          # 启动新容器
+          docker-compose up -d
+
+          # 等待服务启动
+          sleep 30
+
+          # 健康检查
+          curl -f http://localhost:5000/api/health || exit 1
+
+  # ==========================================
+  # 部署到测试环境
+  # ==========================================
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
+
+    steps:
+    - name: 部署到测试服务器
+      uses: appleboy/ssh-action@v1.0.0
+      with:
+        host: ${{ secrets.STAGING_HOST }}
+        username: ${{ secrets.STAGING_USER }}
+        key: ${{ secrets.STAGING_SSH_KEY }}
+        script: |
+          # 停止当前容器
+          docker-compose down
+
+          # 拉取最新镜像
+          docker pull ${{ secrets.DOCKER_USERNAME }}/zhiqi-wellness:latest
+
+          # 启动新容器
+          docker-compose up -d
+
+          # 等待服务启动
+          sleep 30
+
+          # 健康检查
+          curl -f http://localhost:5000/api/health || exit 1
+
+  # ==========================================
+  # 安全扫描
+  # ==========================================
+  security-scan:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 运行Trivy漏洞扫描
+      uses: aquasecurity/trivy-action@master
+      with:
+        scan-type: 'fs'
+        scan-ref: '.'
+        format: 'sarif'
+        output: 'trivy-results.sarif'
+
+    - name: 上传Trivy扫描结果
+      uses: github/codeql-action/upload-sarif@v2
+      if: always()
+      with:
+        sarif_file: 'trivy-results.sarif'
+
+  # ==========================================
+  # 代码质量检查
+  # ==========================================
+  code-quality:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: 检出代码
+      uses: actions/checkout@v4
+
+    - name: 设置Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.9'
+
+    - name: 安装Python代码质量工具
+      run: |
+        pip install flake8 black isort mypy
+
+    - name: 运行Flake8
+      run: |
+        cd backend
+        flake8 app.py --max-line-length=100 --ignore=E203,W503
+
+    - name: 运行Black代码格式化检查
+      run: |
+        cd backend
+        black --check --diff app.py
+
+    - name: 设置Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '16'
+
+    - name: 运行ESLint
+      run: |
+        cd frontend
+        npm ci
+        npm run lint
+
+  # ==========================================
+  # 性能测试
+  # ==========================================
+  performance-test:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/develop'
+
+    steps:
+    - name: 运行性能测试
+      run: |
+        # 使用Lighthouse CI进行前端性能测试
+        npm install -g lighthouse
+        lighthouse http://staging.zhiqi-wellness.com --output=json --output-path=./lighthouse-results.json
+
+    - name: 上传性能测试结果
+      uses: actions/upload-artifact@v3
+      with:
+        name: lighthouse-results
+        path: lighthouse-results.json
+
+  # ==========================================
+  # 通知
+  # ==========================================
+  notification:
+    runs-on: ubuntu-latest
+    needs: [backend-test, frontend-test, docker-build, security-scan, code-quality]
+    if: always()
+
+    steps:
+    - name: 发送部署通知
+      uses: 8398a7/action-slack@v3
+      with:
+        status: ${{ job.status }}
+        channel: '#deployments'
+        webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        fields: repo,message,commit,author,action,eventName,ref,workflow
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK }}
